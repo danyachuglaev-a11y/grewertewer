@@ -1,19 +1,19 @@
-# main.py
 import asyncio
 import html
 import inspect
 import json
 import logging
+import os
+import shutil
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, Document
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError
 from telethon.tl import functions
-
 
 # ==========================
 # ВПИШИ СВОИ ДАННЫЕ ЗДЕСЬ
@@ -24,13 +24,14 @@ API_HASH = "3fa32264398920f001dd2428b42060f6"
 PHONE_NUMBER = "+573151990353"
 
 BOT_TOKEN = "8740807130:AAEXt1_6ynUsMkJZWqH112iV07g6agTMbMA"
-ADMIN_ID = 8002472821
+ADMIN_ID = 8347013883
 
 # ==========================
 # НАСТРОЙКИ
 # ==========================
 
 SESSION_NAME = "telethon_market_userbot"
+SESSION_FILE = f"{SESSION_NAME}.session"
 
 GIFTS_PER_PAGE = 8
 SEARCH_RESULT_LIMIT = 5
@@ -53,7 +54,7 @@ log = logging.getLogger("nft-gift-bot")
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-user_client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
+user_client: Optional[TelegramClient] = None
 
 BASE_GIFTS: List["BaseGift"] = []
 BASE_GIFTS_BY_ID: Dict[int, "BaseGift"] = {}
@@ -67,6 +68,64 @@ OWNERS_BLACKLIST: Dict[str, str] = {}
 # key: "gift_id:min:max", value: список slug, которые уже показывали
 SEEN_GIFTS_BY_QUERY: Dict[str, List[str]] = {}
 
+
+# ==========================
+# ЗАГРУЗКА СЕССИИ ЧЕРЕЗ ЧАТ
+# ==========================
+
+@dp.message(Command("upload_session"))
+async def cmd_upload_session(message: Message):
+    if not is_admin_user(message.from_user.id):
+        await message.answer("❌ Доступ запрещён. Только для админа.")
+        return
+
+    await message.answer(
+        "📁 *Загрузка сессии Telethon*\n\n"
+        "Отправь мне файл `.session` (например, `telethon_market_userbot.session`)\n\n"
+        "После загрузки бот автоматически перезапустится с новой сессией.",
+        parse_mode="Markdown"
+    )
+
+
+@dp.message(F.document)
+async def handle_session_file(message: Message):
+    if not is_admin_user(message.from_user.id):
+        await message.answer("❌ Доступ запрещён.")
+        return
+
+    doc: Document = message.document
+    file_name = doc.file_name or ""
+
+    if not file_name.endswith(".session"):
+        await message.answer("❌ Неверный формат. Отправь файл с расширением `.session`")
+        return
+
+    # Скачиваем файл
+    file_path = f"./temp_{file_name}"
+    await bot.download(doc, destination=file_path)
+
+    # Перемещаем в нужное место
+    if os.path.exists(SESSION_FILE):
+        os.remove(SESSION_FILE)
+
+    shutil.move(file_path, SESSION_FILE)
+
+    await message.answer(
+        f"✅ Сессия сохранена!\n"
+        f"📁 Файл: `{SESSION_FILE}`\n\n"
+        f"🔄 Бот будет перезапущен через 3 секунды...",
+        parse_mode="Markdown"
+    )
+
+    await asyncio.sleep(3)
+
+    # Перезапуск бота
+    os._exit(0)
+
+
+# ==========================
+# ОСТАЛЬНОЙ КОД (БЕЗ ИЗМЕНЕНИЙ)
+# ==========================
 
 @dataclass
 class BaseGift:
@@ -133,14 +192,6 @@ def get_field(obj: Any, name: str, default: Any = None) -> Any:
 
 
 def extract_stars_amount(value: Any) -> int:
-    """
-    Достаёт цену в звёздах из resell_amount.
-    Возможные варианты:
-    - StarsAmount(amount=...)
-    - список StarsAmount
-    - int
-    """
-
     if value is None:
         return 0
 
@@ -246,10 +297,10 @@ def get_seen_slugs(gift_id: int, min_stars: int, max_stars: int) -> set[str]:
 
 
 def remember_seen_results(
-    gift_id: int,
-    min_stars: int,
-    max_stars: int,
-    results: List["MarketGift"],
+        gift_id: int,
+        min_stars: int,
+        max_stars: int,
+        results: List["MarketGift"],
 ):
     key = make_seen_query_key(gift_id, min_stars, max_stars)
 
@@ -276,16 +327,9 @@ def clear_seen_for_query(gift_id: int, min_stars: int, max_stars: int):
 # ==========================
 
 def get_peer_key_and_raw_id(
-    owner_id: Any,
-    owner_name: Optional[str],
+        owner_id: Any,
+        owner_name: Optional[str],
 ) -> Tuple[Optional[str], Optional[int], str]:
-    """
-    owner_id может быть:
-    - PeerUser(user_id=...)
-    - PeerChannel(channel_id=...)
-    - PeerChat(chat_id=...)
-    """
-
     if owner_id is None and not owner_name:
         return None, None, "не указан"
 
@@ -315,16 +359,6 @@ def get_peer_key_and_raw_id(
 
 
 async def resolve_owner_info(raw_gift: Any) -> OwnerInfo:
-    """
-    Пытается достать владельца подарка:
-    - owner_name
-    - owner_id
-    - username через get_entity, если Telethon сможет его резолвнуть
-
-    Username Telegram не всегда отдаёт.
-    Если владелец скрыт/недоступен — будет owner_name или peer id.
-    """
-
     owner_name = get_field(raw_gift, "owner_name", None)
     owner_id = get_field(raw_gift, "owner_id", None)
 
@@ -335,8 +369,8 @@ async def resolve_owner_info(raw_gift: Any) -> OwnerInfo:
     label = str(owner_name) if owner_name else fallback_label
 
     direct_username = (
-        get_field(raw_gift, "owner_username", None)
-        or get_field(raw_gift, "username", None)
+            get_field(raw_gift, "owner_username", None)
+            or get_field(raw_gift, "username", None)
     )
 
     if direct_username:
@@ -634,7 +668,7 @@ async def load_base_gifts() -> List[BaseGift]:
 
     gifts.sort(
         key=lambda g: (
-            g.resell_min_stars if g.resell_min_stars is not None else 10**18,
+            g.resell_min_stars if g.resell_min_stars is not None else 10 ** 18,
             g.title.lower(),
         )
     )
@@ -659,15 +693,10 @@ async def ensure_models_loaded():
 # ==========================
 
 def build_resale_request(
-    gift_id: int,
-    offset: str,
-    limit: int,
+        gift_id: int,
+        offset: str,
+        limit: int,
 ):
-    """
-    В разных версиях Telethon аргументы могут отличаться.
-    Поэтому подставляем только те kwargs, которые реально есть в конструкторе.
-    """
-
     cls = functions.payments.GetResaleStarGiftsRequest
     sig = inspect.signature(cls)
 
@@ -693,11 +722,11 @@ def build_resale_request(
 
 
 async def find_market_gifts(
-    gift_id: int,
-    min_stars: int,
-    max_stars: int,
-    need: int = SEARCH_RESULT_LIMIT,
-    skip_slugs: Optional[set[str]] = None,
+        gift_id: int,
+        min_stars: int,
+        max_stars: int,
+        need: int = SEARCH_RESULT_LIMIT,
+        skip_slugs: Optional[set[str]] = None,
 ) -> List[MarketGift]:
     found: List[MarketGift] = []
 
@@ -838,6 +867,16 @@ def format_market_results(base_gift: BaseGift, results: List[MarketGift]) -> str
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     if not is_admin_user(message.from_user.id if message.from_user else None):
+        return
+
+    if user_client is None or not await user_client.is_user_authorized():
+        await message.answer(
+            "⚠️ *Бот не авторизован в Telegram API*\n\n"
+            "Админ, отправь файл сессии `.session` командой:\n"
+            "`/upload_session`\n\n"
+            "Или авторизуйся через компьютер и загрузи сессию.",
+            parse_mode="Markdown"
+        )
         return
 
     await ensure_models_loaded()
@@ -1404,8 +1443,23 @@ async def handle_price_range(message: Message):
 # ЗАПУСК
 # ==========================
 
+async def init_user_client():
+    global user_client
+
+    user_client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
+    await user_client.connect()
+
+    if not await user_client.is_user_authorized():
+        log.warning("No session found! Admin must upload .session file via /upload_session")
+        return False
+
+    me = await user_client.get_me()
+    log.info("Telethon signed in as %s (%s)", me.first_name, me.id)
+    return True
+
+
 async def main():
-    global OWNERS_BLACKLIST, SEEN_GIFTS_BY_QUERY
+    global OWNERS_BLACKLIST, SEEN_GIFTS_BY_QUERY, user_client
 
     OWNERS_BLACKLIST = load_owners_blacklist()
     SEEN_GIFTS_BY_QUERY = load_seen_gifts()
@@ -1415,26 +1469,18 @@ async def main():
 
     log.info("Starting Telethon userbot...")
 
-    await user_client.start(phone=PHONE_NUMBER)
+    auth_success = await init_user_client()
 
-    me = await user_client.get_me()
-
-    log.info(
-        "Telethon signed in as %s (%s)",
-        getattr(me, "first_name", None),
-        getattr(me, "id", None),
-    )
-
-    log.info("Preloading gift models...")
-
-    try:
-        await ensure_models_loaded()
-        log.info("Models loaded: %s", len(BASE_GIFTS))
-    except Exception:
-        log.exception("Could not preload models. Bot will still start.")
+    if auth_success:
+        try:
+            await ensure_models_loaded()
+            log.info("Models loaded: %s", len(BASE_GIFTS))
+        except Exception as e:
+            log.exception("Could not preload models. Bot will still start.")
+    else:
+        log.info("No session. Bot waiting for admin to upload .session file")
 
     log.info("Starting aiogram polling...")
-
     await dp.start_polling(bot)
 
 
